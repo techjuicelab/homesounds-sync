@@ -5,6 +5,10 @@ Package.resolved
 # App bundle (regenerate with ./build.sh)
 *.app
 
+# Distribution artifacts (regenerate with ./make-dmg.sh)
+*.dmg
+*.zip
+
 # Icon intermediates (regenerate with ./makeicon.sh)
 *.iconset
 

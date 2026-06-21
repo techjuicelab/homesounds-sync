@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var helpWindow: NSWindow?
     private var languageLabel: NSTextField?
     private var languagePopup: NSPopUpButton?
+    private var refreshButton: NSButton?
     private var helpTextView: NSTextView?
 
     // Dynamic speaker lists (scrollable; one row per discovered device).
@@ -634,6 +635,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.addSubview(popup)
         languagePopup = popup
 
+        let refresh = NSButton(title: language.text.refreshDevices,
+                               target: self, action: #selector(refreshDevices(_:)))
+        refresh.bezelStyle = .rounded
+        refresh.frame = NSRect(x: 266, y: frame.height - 47, width: 150, height: 28)
+        refresh.autoresizingMask = [.minYMargin]
+        root.addSubview(refresh)
+        refreshButton = refresh
+
         let divider = NSBox(frame: NSRect(x: 0, y: frame.height - 58, width: frame.width, height: 1))
         divider.boxType = .separator
         divider.autoresizingMask = [.width, .minYMargin]
@@ -665,6 +674,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return w
     }
 
+    @objc private func refreshDevices(_ sender: NSButton) {
+        reconcileAirPlay()
+        reconcileLocal()
+        // Brief inline confirmation, then restore the label.
+        let original = language.text.refreshDevices
+        sender.title = language.text.refreshDone
+        sender.isEnabled = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak sender] in
+            sender?.title = original
+            sender?.isEnabled = true
+        }
+    }
+
     @objc private func languageChanged(_ sender: NSPopUpButton) {
         guard let rawValue = sender.selectedItem?.representedObject as? String,
               let selected = AppLanguage(rawValue: rawValue),
@@ -676,6 +698,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard window != nil else { return }
         let t = language.text
         helpButton.title = t.settingsButton
+        refreshButton?.title = t.refreshDevices
         airplayLabel.stringValue = t.airPlaySection
         airplayEmpty.stringValue = t.airPlayEmpty
         localLabel.stringValue = t.localSection

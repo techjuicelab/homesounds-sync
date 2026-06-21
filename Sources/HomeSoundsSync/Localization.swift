@@ -123,6 +123,20 @@ struct AppText {
         }
     }
 
+    var refreshDevices: String {
+        switch language {
+        case .ko: return "기기 새로고침"
+        case .en: return "Refresh Devices"
+        }
+    }
+
+    var refreshDone: String {
+        switch language {
+        case .ko: return "새로고침됨 ✓"
+        case .en: return "Refreshed ✓"
+        }
+    }
+
     var musicTerminated: String {
         switch language {
         case .ko: return "Apple Music이 종료되어 동기화를 멈췄습니다."
