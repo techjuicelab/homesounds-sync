@@ -1,0 +1,24 @@
+# Swift / SwiftPM build artifacts
+.build/
+Package.resolved
+
+# App bundle (regenerate with ./build.sh)
+*.app
+
+# Icon intermediates (regenerate with ./makeicon.sh)
+*.iconset
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+*.xcodeproj
+.swiftpm/
+.vscode/
+
+# Tooling / assistant session state (never publish)
+.omc/
+.claude/
+
+# Local diagnostics
+hss-debug.log
