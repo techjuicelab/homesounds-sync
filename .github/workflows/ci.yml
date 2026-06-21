@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Ring buffer test (incl. multi-reader)
+        run: |
+          mkdir -p /tmp/rt
+          cp Tests/ringtest.swift /tmp/rt/main.swift
+          cp Sources/HomeSoundsSync/RingBuffer.swift /tmp/rt/RingBuffer.swift
+          swiftc -O /tmp/rt/main.swift /tmp/rt/RingBuffer.swift -o /tmp/ringtest
+          /tmp/ringtest
+
+      - name: Whitespace / conflict check
+        run: git diff --check HEAD
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint shell scripts
+        run: shellcheck setup.sh build.sh makeicon.sh

@@ -21,6 +21,6 @@
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>Apple Music의 소리를 캡처해 로컬 스피커로 지연 재생하여 HomePod/AirPlay 스피커와 동기화하기 위해 사용됩니다.</string>
+    <string>HomeSounds Sync needs system audio recording permission to capture Apple Music and sync local speakers with HomePod/AirPlay speakers. Apple Music의 소리를 캡처해 로컬 스피커와 HomePod/AirPlay 스피커를 동기화하기 위해 사용됩니다.</string>
 </dict>
 </plist>

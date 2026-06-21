@@ -4,7 +4,7 @@ import Synchronization
 /// Streams captured audio (real-time, no delay) to OwnTone via a named FIFO as
 /// interleaved PCM16. OwnTone reads the pipe and AirPlays it to the HomePod.
 ///
-/// The local EDIFIER leg (delayed) is handled separately by OutputRenderer; this
+/// The delayed local-output leg is handled separately by OutputRenderer; this
 /// path feeds the HomePod leg. Float32 → Int16 conversion only (OwnTone is
 /// configured for pipe_sample_rate=48000, pipe_bits_per_sample=16).
 final class FifoFeed {
@@ -69,9 +69,15 @@ final class FifoFeed {
 
         while runningFlag.load(ordering: .acquiring) {
             if fd < 0 {
-                // Blocks until OwnTone has the read end open (it watches the pipe).
-                fd = open(path, O_WRONLY)
+                // Open non-blocking: a plain O_WRONLY open of a FIFO blocks until a
+                // reader appears, which would hang this thread forever (and defeat
+                // stop()) whenever OwnTone is down or only local speakers are used.
+                // O_NONBLOCK returns ENXIO instead, so we just retry and the loop
+                // keeps checking runningFlag. Once open, switch to blocking writes.
+                fd = open(path, O_WRONLY | O_NONBLOCK)
                 if fd < 0 { usleep(200_000); continue }
+                let flags = fcntl(fd, F_GETFL)
+                if flags >= 0 { _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) }
             }
 
             let w = writeIndex.load(ordering: .acquiring)

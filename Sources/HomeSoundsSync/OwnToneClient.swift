@@ -5,7 +5,10 @@ import Foundation
 /// so the user can pick their HomePod by name from inside the app.
 enum OwnToneClient {
 
-    static let base = "http://localhost:3689"
+    // 127.0.0.1 (not "localhost") to match OwnTone's loopback bind_address and to
+    // avoid an IPv6/IPv4 resolution mismatch. OwnTone is configured to listen on
+    // loopback only (see setup.sh), so this never leaves the machine.
+    static let base = "http://127.0.0.1:3689"
 
     struct Output {
         let id: String
@@ -13,6 +16,13 @@ enum OwnToneClient {
         let type: String
         let selected: Bool
         let volume: Int        // 0–100
+    }
+
+    /// Build `…/api/outputs/{id}` with the id percent-encoded as a path segment,
+    /// so an unusual output id can never break or inject into the URL.
+    private static func outputURL(id: String) -> URL? {
+        guard let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return nil }
+        return URL(string: "\(base)/api/outputs/\(encoded)")
     }
 
     /// GET /api/outputs → AirPlay outputs only (HomePods / Apple TVs / etc.).
@@ -38,7 +48,7 @@ enum OwnToneClient {
 
     /// Set the HomePod (AirPlay output) volume, 0–100.
     static func setVolume(id: String, volume: Int) {
-        guard let url = URL(string: "\(base)/api/outputs/\(id)") else { return }
+        guard let url = outputURL(id: id) else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -49,7 +59,7 @@ enum OwnToneClient {
     /// Enable or disable one AirPlay output independently (multi-room: several
     /// outputs can be selected at once; AirPlay 2 keeps them sample-synced).
     static func setSelected(id: String, on: Bool) {
-        guard let url = URL(string: "\(base)/api/outputs/\(id)") else { return }
+        guard let url = outputURL(id: id) else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

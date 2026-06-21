@@ -71,9 +71,9 @@ final class ProcessTapCapture {
             description.uuid = UUID()
             description.name = "HomeSoundsSync Tap"
             description.isPrivate = true
-            // Mute Music's LOCAL render (so the Computer/EDIFIER leg doesn't double
-            // with our delayed copy) while still capturing it. The AirPlay/HomePod
-            // leg is a separate path and is expected to keep playing.
+            // Mute Music's local render so the Computer output doesn't double with
+            // our delayed copy, while still capturing it. The AirPlay/HomePod leg
+            // is a separate path and is expected to keep playing.
             description.muteBehavior = .muted
 
             var newTap = AudioObjectID(kAudioObjectUnknown)

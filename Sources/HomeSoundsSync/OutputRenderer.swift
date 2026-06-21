@@ -3,9 +3,9 @@ import CoreAudio
 import AudioToolbox
 import Synchronization
 
-/// Plays the delayed copy of Music's audio to a chosen output device (e.g. the
-/// EDIFIER M60) via an AUHAL output unit. Its render callback pulls samples from
-/// the ring buffer `delayFrames` behind the live write head.
+/// Plays the delayed copy of Music's audio to a chosen local output device via
+/// an AUHAL output unit. Its render callback pulls samples from the ring buffer
+/// `delayFrames` behind the live write head.
 final class OutputRenderer {
 
     enum OutputError: Error, CustomStringConvertible {
@@ -38,7 +38,7 @@ final class OutputRenderer {
     private let reader: DelayReader
     let delayFrames = Atomic<Int64>(0)
 
-    /// Software volume for the local (EDIFIER) output, 0…1.5 (×1000, atomic).
+    /// Software volume for the local output, 0…1.5 (×1000, atomic).
     private let gainMilli = Atomic<Int>(1000)
     func setGain(_ g: Double) { gainMilli.store(Int(max(0, min(1.5, g)) * 1000), ordering: .releasing) }
 
@@ -203,7 +203,7 @@ final class OutputRenderer {
         let delay = Int(delayFrames.load(ordering: .acquiring))
         reader.read(into: dst, frames: frames, delayFrames: delay, resyncThreshold: resyncThreshold)
 
-        // Apply the local-output (EDIFIER) volume.
+        // Apply the local-output volume.
         let gain = Float(gainMilli.load(ordering: .acquiring)) / 1000.0
         if gain != 1.0 {
             let n = frames * 2

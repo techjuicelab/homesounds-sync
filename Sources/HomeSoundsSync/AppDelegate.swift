@@ -1,7 +1,7 @@
 import AppKit
 import CoreAudio
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private let engine = SyncEngine()
     private let devices = AudioDevices()
@@ -9,23 +9,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var statusLabel: NSTextField!
     private var toggleButton: NSButton!
+    private var helpButton: NSButton!
+    private var helpWindow: NSWindow?
+    private var languageLabel: NSTextField?
+    private var languagePopup: NSPopUpButton?
+    private var helpTextView: NSTextView?
 
     // Dynamic speaker lists (scrollable; one row per discovered device).
+    private var airplayLabel: NSTextField!
+    private var airplayCard: NSView!
     private var airplayScroll: NSScrollView!
     private var airplayDoc: FlippedView!
     private var airplayEmpty: NSTextField!
+    private var localLabel: NSTextField!
+    private var localCard: NSView!
     private var localScroll: NSScrollView!
     private var localDoc: FlippedView!
 
     private var airplayRows: [String: AirPlayRow] = [:]   // OwnTone output id → row
     private var localRows: [String: LocalRow] = [:]       // Core Audio device UID → row
     private var airplayOrder: [String] = []
+    private var localOrder: [String] = []
 
     private var pollTimer: Timer?
 
-    private let rowWidth: CGFloat = 458
-    private let airplayRowH: CGFloat = 32
-    private let localRowH: CGFloat = 60
+    private let rowWidth: CGFloat = 458    // creation width; rows autoresize to the live width
+    private let airplayRowH: CGFloat = 28
+    private let localRowH: CGFloat = 52
     private let maxDelayMs = 20000.0
     private var defaultDelayMs = 2000.0
 
@@ -43,6 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localGain: [String: Double] {   // percent, 0…150
         didSet { UserDefaults.standard.set(localGain, forKey: Keys.localGain) }
     }
+    private var language: AppLanguage {
+        didSet {
+            UserDefaults.standard.set(language.rawValue, forKey: Keys.language)
+            applyLanguage()
+        }
+    }
 
     private enum Keys {
         static let enabledAirPlay = "enabledAirPlayIds"
@@ -50,6 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let localDelay = "localDelayMsByUID"
         static let localGain = "localGainByUID"
         static let legacyDelay = "delayMs"   // migrate the old single global delay
+        static let windowFrame = "mainWindowFrame"
+        static let language = "appLanguage"
     }
 
     override init() {
@@ -58,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         enabledLocal = Set((d.array(forKey: Keys.enabledLocal) as? [String]) ?? [])
         localDelayMs = (d.dictionary(forKey: Keys.localDelay) as? [String: Double]) ?? [:]
         localGain = (d.dictionary(forKey: Keys.localGain) as? [String: Double]) ?? [:]
+        language = AppLanguage(defaultsValue: d.string(forKey: Keys.language))
         // Seed new rows near the user's previously tuned single-output delay,
         // clamped into the UI range so a stale legacy value can't seed out of range.
         let legacy = d.object(forKey: Keys.legacyDelay) as? Double ?? 2000
@@ -72,9 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         engine.onOutputLost = { uid in
             // Device unplugged: the renderer is already gone. Keep it enabled so it
-            // re-attaches automatically when the device comes back. We do NOT touch
-            // the checkbox here — reconcileLocal keeps every row's check state in
-            // sync with `enabledLocal`, so the box can never lie about audio state.
+            // re-attaches automatically when the device comes back. reconcileLocal
+            // keeps every row's check state in sync with `enabledLocal`.
             DBG.log("[HSS] local output lost: \(uid) (re-attaches when device returns)")
         }
 
@@ -86,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   app.bundleIdentifier == "com.apple.Music" else { return }
             self.stopEngine()
-            self.showAlert("Apple Music이 종료되어 동기화를 멈췄습니다.")
+            self.showAlert(self.language.text.musicTerminated)
         }
 
         showWindow()
@@ -103,89 +121,166 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Window
 
     private func buildWindow() {
-        let frame = NSRect(x: 0, y: 0, width: 520, height: 560)
-        let win = NSWindow(contentRect: frame,
-                           styleMask: [.titled, .closable, .miniaturizable],
+        let t = language.text
+        let saved = UserDefaults.standard.string(forKey: Keys.windowFrame)
+        let initial = NSRect(x: 0, y: 0, width: 540, height: 600)
+        let win = NSWindow(contentRect: initial,
+                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                            backing: .buffered, defer: false)
         win.title = "HomeSounds Sync"
         win.titlebarAppearsTransparent = true
         win.isReleasedWhenClosed = false
-        win.center()
+        win.delegate = self
+        win.minSize = NSSize(width: 460, height: 500)
 
-        let content = NSVisualEffectView(frame: frame)
+        let content = NSVisualEffectView(frame: initial)
         content.material = .windowBackground
         content.blendingMode = .behindWindow
         content.state = .active
+        content.autoresizingMask = [.width, .height]
 
         statusLabel = NSTextField(labelWithString: "")
-        statusLabel.frame = NSRect(x: 24, y: 522, width: 472, height: 26)
         statusLabel.font = .systemFont(ofSize: 16, weight: .semibold)
         content.addSubview(statusLabel)
 
-        // ── AirPlay speakers (dynamic) ────────────────────
-        content.addSubview(sectionLabel("AirPlay 스피커 (HomePod·Apple TV) — 여러 대 동시", y: 502))
-        let (apCard, apScroll, apDoc) = scrollList(cardFrame: NSRect(x: 20, y: 400, width: 480, height: 98))
+        helpButton = NSButton(title: t.settingsButton, target: self, action: #selector(showHelp(_:)))
+        helpButton.bezelStyle = .rounded
+        helpButton.font = .systemFont(ofSize: 12)
+        content.addSubview(helpButton)
+
+        airplayLabel = sectionLabel(t.airPlaySection)
+        content.addSubview(airplayLabel)
+        let (apCard, apScroll, apDoc) = makeScrollList()
+        airplayCard = apCard; airplayScroll = apScroll; airplayDoc = apDoc
         content.addSubview(apCard); content.addSubview(apScroll)
-        airplayScroll = apScroll; airplayDoc = apDoc
-        airplayEmpty = NSTextField(labelWithString: "OwnTone 미실행 또는 발견된 AirPlay 기기 없음")
+        airplayEmpty = NSTextField(labelWithString: t.airPlayEmpty)
         airplayEmpty.frame = NSRect(x: 10, y: 8, width: rowWidth - 16, height: 18)
         airplayEmpty.font = .systemFont(ofSize: 11)
         airplayEmpty.textColor = .secondaryLabelColor
+        airplayEmpty.autoresizingMask = [.width]
         airplayDoc.addSubview(airplayEmpty)
 
-        // ── Local (wired/USB) speakers (dynamic) ──────────
-        content.addSubview(sectionLabel("로컬 스피커 (이 Mac) — 각자 지연 조절, 여러 대 동시", y: 380))
-        let (lcCard, lcScroll, lcDoc) = scrollList(cardFrame: NSRect(x: 20, y: 210, width: 480, height: 162))
+        localLabel = sectionLabel(t.localSection)
+        content.addSubview(localLabel)
+        let (lcCard, lcScroll, lcDoc) = makeScrollList()
+        localCard = lcCard; localScroll = lcScroll; localDoc = lcDoc
         content.addSubview(lcCard); content.addSubview(lcScroll)
-        localScroll = lcScroll; localDoc = lcDoc
 
-        // ── Master toggle ─────────────────────────────────
-        toggleButton = NSButton(frame: NSRect(x: 20, y: 150, width: 480, height: 44))
+        toggleButton = NSButton(title: "", target: self, action: #selector(toggle(_:)))
         toggleButton.bezelStyle = .rounded
-        toggleButton.font = .systemFont(ofSize: 15, weight: .semibold)
+        toggleButton.font = .systemFont(ofSize: 13, weight: .semibold)
         toggleButton.bezelColor = .systemPurple
-        toggleButton.target = self
-        toggleButton.action = #selector(toggle(_:))
         toggleButton.keyEquivalent = "\r"
         content.addSubview(toggleButton)
 
-        let hint = NSTextField(wrappingLabelWithString:
-            "• Apple Music 출력은 Computer로 두세요 — HomePod은 위 목록에서 켭니다(OwnTone가 담당).\n" +
-            "• 보낼 스피커를 체크하면 늘어납니다. 로컬 스피커는 각 행의 ‘지연’으로 맞추세요.\n" +
-            "• EDIFIER가 먼저 들리면 지연 ↑, HomePod이 먼저면 지연 ↓. AirPlay 여러 대는 서로 자동 동기화.")
-        hint.frame = NSRect(x: 24, y: 18, width: 472, height: 112)
-        hint.font = .systemFont(ofSize: 11)
-        hint.textColor = .secondaryLabelColor
-        content.addSubview(hint)
-
         win.contentView = content
         window = win
+
+        if let saved {
+            let f = NSRectFromString(saved)
+            if f.width >= win.minSize.width, f.height >= win.minSize.height, Self.frameIsOnScreen(f) {
+                win.setFrame(f, display: false)
+            } else {
+                win.center()   // saved frame is off-screen (e.g. a display was unplugged)
+            }
+        } else {
+            win.center()
+        }
+        layoutContent()
     }
 
-    private func sectionLabel(_ text: String, y: CGFloat) -> NSTextField {
+    /// Reposition every section for the current window size. Called on build and
+    /// on every resize, so the speaker lists expand to fill the whole window
+    /// (hidden speakers become visible as the window grows).
+    private func layoutContent() {
+        guard let window, let content = window.contentView else { return }
+        let b = content.bounds
+        let W = b.width, H = b.height
+        let M: CGFloat = 16
+
+        let helpW: CGFloat = 66
+        let toggleW: CGFloat = 74
+        helpButton.frame = NSRect(x: W - M - helpW, y: H - 42, width: helpW, height: 26)
+        toggleButton.frame = NSRect(x: helpButton.frame.minX - 8 - toggleW, y: H - 42, width: toggleW, height: 26)
+        statusLabel.frame = NSRect(x: 24, y: H - 41, width: max(120, toggleButton.frame.minX - 36), height: 24)
+
+        let topY = H - 52                  // top of the section stack (below status)
+        let bottomY: CGFloat = 16
+        let labelH: CGFloat = 16
+        let gap: CGFloat = 4
+        let sectionGap: CGFloat = 8
+        let cardsArea = max(80, (topY - bottomY) - 2 * labelH - 2 * gap - sectionGap)
+
+        // AirPlay takes the rows it needs, then local speakers get the rest.
+        // Resizing the window vertically now directly reveals more device rows.
+        let apContent = CGFloat(max(airplayRows.count, 1)) * airplayRowH + (airplayRows.isEmpty ? 24 : 4)
+        let minAP: CGFloat = 44
+        let minLocal: CGFloat = 96
+        let apMax = max(minAP, min(cardsArea - minLocal, cardsArea * 0.42))
+        let apCardH = min(max(apContent, minAP), apMax)
+        let lcCardH = max(minLocal, cardsArea - apCardH)
+
+        var y = topY
+        airplayLabel.frame = NSRect(x: 28, y: y - labelH, width: W - 56, height: labelH)
+        y -= labelH + gap
+        airplayCard.frame = NSRect(x: M, y: y - apCardH, width: W - 2 * M, height: apCardH)
+        airplayScroll.frame = airplayCard.frame.insetBy(dx: 1, dy: 1)
+        y -= apCardH + sectionGap
+
+        localLabel.frame = NSRect(x: 28, y: y - labelH, width: W - 56, height: labelH)
+        y -= labelH + gap
+        localCard.frame = NSRect(x: M, y: y - lcCardH, width: W - 2 * M, height: lcCardH)
+        localScroll.frame = localCard.frame.insetBy(dx: 1, dy: 1)
+
+        relayoutLists()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        layoutContent()
+    }
+
+    func windowDidMove(_ notification: Notification) { saveWindowFrame() }
+    func windowWillClose(_ notification: Notification) { saveWindowFrame() }
+
+    private func saveWindowFrame() {
+        guard let window else { return }
+        UserDefaults.standard.set(NSStringFromRect(window.frame), forKey: Keys.windowFrame)
+    }
+
+    /// True if `f` overlaps a connected screen enough to be grabbable — guards
+    /// against restoring a window onto a display that is no longer attached.
+    private static func frameIsOnScreen(_ f: NSRect) -> Bool {
+        for screen in NSScreen.screens {
+            let hit = screen.visibleFrame.intersection(f)
+            if hit.width > 120, hit.height > 60 { return true }
+        }
+        return false
+    }
+
+    private func sectionLabel(_ text: String) -> NSTextField {
         let l = NSTextField(labelWithString: text)
-        l.frame = NSRect(x: 28, y: y, width: 470, height: 14)
         l.font = .systemFont(ofSize: 11, weight: .semibold)
         l.textColor = .secondaryLabelColor
+        l.lineBreakMode = .byTruncatingTail
         return l
     }
 
     /// A rounded "card" background + a transparent scroll view with a flipped
     /// document view that holds dynamically-added speaker rows.
-    private func scrollList(cardFrame: NSRect) -> (NSView, NSScrollView, FlippedView) {
-        let card = NSView(frame: cardFrame)
+    private func makeScrollList() -> (NSView, NSScrollView, FlippedView) {
+        let card = NSView()
         card.wantsLayer = true
         card.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         card.layer?.cornerRadius = 12
         card.layer?.borderWidth = 0.5
         card.layer?.borderColor = NSColor.separatorColor.cgColor
 
-        let scroll = NSScrollView(frame: cardFrame.insetBy(dx: 1, dy: 1))
+        let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
-        let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: rowWidth, height: cardFrame.height - 2))
+        let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: rowWidth, height: 10))
         scroll.documentView = doc
         return (card, scroll, doc)
     }
@@ -224,11 +319,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 row.container.removeFromSuperview()
                 self.airplayRows[id] = nil
             }
+            let countChanged = self.airplayOrder.count != order.count
             self.airplayOrder = order
             self.airplayEmpty.isHidden = !order.isEmpty
-            self.layout(doc: self.airplayDoc, scroll: self.airplayScroll,
-                        containers: order.compactMap { self.airplayRows[$0]?.container },
-                        rowHeight: self.airplayRowH)
+            // Row count drives the AirPlay card height, so re-run the whole layout
+            // when it changes; otherwise just re-place the rows.
+            if countChanged { self.layoutContent() } else { self.relayoutLists() }
         }
     }
 
@@ -245,46 +341,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 localRows[d.uid] = row
                 localDoc.addSubview(row.container)
             }
-            // Keep the checkbox honest: it always mirrors the persisted enabled set,
-            // so it can never read OFF while the speaker is actually playing.
+            // Keep the checkbox honest: it always mirrors the persisted enabled set.
             localRows[d.uid]?.check.state = enabledLocal.contains(d.uid) ? .on : .off
         }
         for (uid, row) in localRows where !seen.contains(uid) {
-            // Don't yank a row out from under an in-progress delay edit (it would
-            // discard the uncommitted value); drop it on a later pass instead.
+            // Don't yank a row out from under an in-progress delay edit.
             if row.delayField.currentEditor() != nil { continue }
             row.container.removeFromSuperview()
             localRows[uid] = nil
         }
-        layout(doc: localDoc, scroll: localScroll,
-               containers: order.compactMap { localRows[$0]?.container },
-               rowHeight: localRowH)
+        localOrder = order
+        relayoutLists()
         syncLocalOutputs(available: available)
     }
 
-    private func layout(doc: FlippedView, scroll: NSScrollView, containers: [NSView], rowHeight: CGFloat) {
-        var y: CGFloat = airplayEmpty != nil && doc === airplayDoc && containers.isEmpty ? 26 : 0
-        for c in containers {
-            c.frame = NSRect(x: 0, y: y, width: rowWidth, height: rowHeight)
-            y += rowHeight
-        }
-        let minH = scroll.contentSize.height
-        doc.frame = NSRect(x: 0, y: 0, width: rowWidth, height: max(y, minH))
+    private func relayoutLists() {
+        layout(doc: airplayDoc, scroll: airplayScroll,
+               containers: airplayOrder.compactMap { airplayRows[$0]?.container }, rowHeight: airplayRowH)
+        layout(doc: localDoc, scroll: localScroll,
+               containers: localOrder.compactMap { localRows[$0]?.container }, rowHeight: localRowH)
     }
 
-    // MARK: - Row builders
+    /// Stack rows top-down in the flipped doc, sized to the live scroll width.
+    /// Row internals follow via their autoresizing masks.
+    private func layout(doc: FlippedView, scroll: NSScrollView, containers: [NSView], rowHeight: CGFloat) {
+        let width = max(120, scroll.contentSize.width)
+        var y: CGFloat = 0
+        for c in containers {
+            c.frame = NSRect(x: 0, y: y, width: width, height: rowHeight)
+            y += rowHeight
+        }
+        doc.frame = NSRect(x: 0, y: 0, width: width, height: max(y, scroll.contentSize.height))
+    }
+
+    // MARK: - Row builders (controls autoresize: name stretches, right-side pinned)
 
     private func makeAirPlayRow(id: String, name: String, volume: Int) -> AirPlayRow {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: rowWidth, height: airplayRowH))
         let check = NSButton(checkboxWithTitle: name, target: self, action: #selector(airplayCheckChanged(_:)))
-        check.frame = NSRect(x: 8, y: 6, width: rowWidth - 8 - 128, height: 20)
+        check.frame = NSRect(x: 8, y: 4, width: rowWidth - 8 - 112, height: 20)
+        check.autoresizingMask = [.width]
         (check.cell as? NSButtonCell)?.lineBreakMode = .byTruncatingTail
         check.state = enabledAirPlay.contains(id) ? .on : .off
         container.addSubview(check)
-        container.addSubview(speakerIcon(x: rowWidth - 122, y: 8))
+        let icon = speakerIcon(x: rowWidth - 104, y: 6)
+        icon.autoresizingMask = [.minXMargin]
+        container.addSubview(icon)
         let vol = NSSlider(value: Double(volume), minValue: 0, maxValue: 100,
                            target: self, action: #selector(airplayVolumeChanged(_:)))
-        vol.frame = NSRect(x: rowWidth - 104, y: 6, width: 96, height: 20)
+        vol.frame = NSRect(x: rowWidth - 86, y: 4, width: 78, height: 20)
+        vol.autoresizingMask = [.minXMargin]
         vol.isContinuous = true
         container.addSubview(vol)
         return AirPlayRow(id: id, container: container, check: check, volume: vol)
@@ -294,45 +400,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: rowWidth, height: localRowH))
         // Top line: enable + name … volume
         let check = NSButton(checkboxWithTitle: name, target: self, action: #selector(localCheckChanged(_:)))
-        check.frame = NSRect(x: 8, y: localRowH - 26, width: rowWidth - 8 - 128, height: 20)
+        check.frame = NSRect(x: 8, y: localRowH - 24, width: rowWidth - 8 - 112, height: 20)
+        check.autoresizingMask = [.width, .minYMargin]
         (check.cell as? NSButtonCell)?.lineBreakMode = .byTruncatingTail
         check.state = enabledLocal.contains(uid) ? .on : .off
         container.addSubview(check)
-        container.addSubview(speakerIcon(x: rowWidth - 122, y: localRowH - 24))
+        let icon = speakerIcon(x: rowWidth - 104, y: localRowH - 22)
+        icon.autoresizingMask = [.minXMargin, .minYMargin]
+        container.addSubview(icon)
         let vol = NSSlider(value: localGain[uid] ?? 100, minValue: 0, maxValue: 150,
                            target: self, action: #selector(localVolumeChanged(_:)))
-        vol.frame = NSRect(x: rowWidth - 104, y: localRowH - 26, width: 96, height: 20)
+        vol.frame = NSRect(x: rowWidth - 86, y: localRowH - 24, width: 78, height: 20)
+        vol.autoresizingMask = [.minXMargin, .minYMargin]
         vol.isContinuous = true
         container.addSubview(vol)
-        // Bottom line: 지연 slider + field + 초
-        let dl = NSTextField(labelWithString: "지연")
-        dl.frame = NSRect(x: 8, y: 8, width: 28, height: 18)
+        let t = language.text
+        // Bottom line: delay slider + field + seconds unit
+        let dl = NSTextField(labelWithString: t.delayLabel)
+        dl.frame = NSRect(x: 8, y: 5, width: 36, height: 18)
         dl.font = .systemFont(ofSize: 11); dl.textColor = .secondaryLabelColor
         container.addSubview(dl)
         let ms = localDelayMs[uid] ?? defaultDelayMs
         let dSlider = NSSlider(value: ms, minValue: 0, maxValue: maxDelayMs,
                                target: self, action: #selector(localDelayChanged(_:)))
-        dSlider.frame = NSRect(x: 40, y: 9, width: rowWidth - 40 - 96, height: 16)
+        dSlider.frame = NSRect(x: 48, y: 6, width: rowWidth - 48 - 88, height: 16)
+        dSlider.autoresizingMask = [.width]
         dSlider.isContinuous = true
         container.addSubview(dSlider)
-        let dField = NSTextField(frame: NSRect(x: rowWidth - 88, y: 6, width: 52, height: 20))
+        let dField = NSTextField(frame: NSRect(x: rowWidth - 80, y: 3, width: 48, height: 20))
         dField.alignment = .right; dField.font = .systemFont(ofSize: 12)
         dField.isBezeled = true; dField.bezelStyle = .roundedBezel
         dField.isEditable = true; dField.isSelectable = true
+        dField.autoresizingMask = [.minXMargin]
         dField.stringValue = String(format: "%.2f", ms / 1000.0)
         dField.target = self; dField.action = #selector(localDelayFieldChanged(_:))
         container.addSubview(dField)
-        let sec = NSTextField(labelWithString: "초")
-        sec.frame = NSRect(x: rowWidth - 30, y: 8, width: 18, height: 18)
+        let sec = NSTextField(labelWithString: t.secondsUnit)
+        sec.frame = NSRect(x: rowWidth - 28, y: 5, width: 24, height: 18)
         sec.font = .systemFont(ofSize: 11); sec.textColor = .secondaryLabelColor
+        sec.autoresizingMask = [.minXMargin]
         container.addSubview(sec)
         return LocalRow(uid: uid, container: container, check: check, volume: vol,
-                        delaySlider: dSlider, delayField: dField)
+                        delayLabel: dl, delaySlider: dSlider, delayField: dField,
+                        secondsLabel: sec)
     }
 
     private func speakerIcon(x: CGFloat, y: CGFloat) -> NSImageView {
         let iv = NSImageView(frame: NSRect(x: x, y: y, width: 16, height: 16))
-        iv.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "볼륨")
+        iv.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
+                           accessibilityDescription: language.text.volumeAccessibility)
         iv.contentTintColor = .secondaryLabelColor
         return iv
     }
@@ -361,15 +477,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for uid in engine.activeOutputUIDs where !enabledLocal.contains(uid) {
             engine.removeOutput(uid: uid)
         }
-        // A device that is present but fails to start (busy/exclusive/format) would
-        // otherwise be retried every 3 s forever. Disable it and tell the user once.
         if !failed.isEmpty {
             for uid in failed {
                 enabledLocal.remove(uid)
                 localRows[uid]?.check.state = .off
             }
             let names = failed.compactMap { byUID[$0]?.name }.joined(separator: ", ")
-            showAlert("이 스피커로 출력을 시작할 수 없어 해제했습니다: \(names.isEmpty ? "(알 수 없는 장치)" : names)\n다른 앱이 독점 사용 중이거나 포맷이 맞지 않을 수 있습니다.")
+            showAlert(language.text.outputStartFailed(names: names))
         }
     }
 
@@ -398,7 +512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if engine.running {
             syncLocalOutputs()
         } else if sender.state == .on {
-            showAlert("‘켜기’를 누르면 선택한 스피커로 재생을 시작합니다.")
+            showAlert(language.text.startAfterTurnOn)
         }
     }
 
@@ -434,13 +548,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startEngine() {
         guard !enabledAirPlay.isEmpty || !enabledLocal.isEmpty else {
-            showAlert("보낼 스피커를 한 개 이상 체크한 뒤 켜기를 누르세요.\n(AirPlay 또는 로컬 목록에서 선택)")
+            showAlert(language.text.chooseSpeakerBeforeStart)
             return
         }
         do {
             try engine.start()
         } catch {
-            showAlert("\(error)")
+            showAlert(language.text.startError(error))
             return
         }
         applyAirPlaySelection()
@@ -459,14 +573,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let before = engine.framesCaptured
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self, self.engine.running, self.engine.framesCaptured == before else { return }
-            self.showAlert("오디오가 캡처되지 않고 있습니다.\n시스템 설정 → 개인정보 보호 및 보안 → 시스템 오디오 녹음에서 권한을 허용한 뒤, Apple Music을 재생하세요. 권한을 방금 허용했다면 끄기 후 다시 켜기를 눌러 주세요.")
+            self.showAlert(self.language.text.captureNotWorking)
         }
     }
 
     private func updateUI() {
-        statusLabel.stringValue = engine.running ? "● 동기화 켜짐" : "○ 동기화 꺼짐"
+        let t = language.text
+        statusLabel.stringValue = engine.running ? t.statusOn : t.statusOff
         statusLabel.textColor = engine.running ? .systemGreen : .secondaryLabelColor
-        toggleButton.title = engine.running ? "끄기" : "켜기"
+        toggleButton.title = engine.running ? t.turnOff : t.turnOn
     }
 
     private func showAlert(_ message: String) {
@@ -474,8 +589,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = "HomeSounds Sync"
         alert.informativeText = message
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "확인")
+        alert.addButton(withTitle: language.text.alertOK)
         alert.runModal()
+    }
+
+    // MARK: - Help / usage window
+
+    @objc private func showHelp(_ sender: NSButton) {
+        if helpWindow == nil { helpWindow = makeHelpWindow() }
+        updateSettingsUI()
+        helpWindow?.center()
+        helpWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func makeHelpWindow() -> NSWindow {
+        let frame = NSRect(x: 0, y: 0, width: 520, height: 560)
+        let w = NSWindow(contentRect: frame,
+                         styleMask: [.titled, .closable, .resizable],
+                         backing: .buffered, defer: false)
+        w.title = language.text.settingsTitle
+        w.isReleasedWhenClosed = false
+        w.minSize = NSSize(width: 420, height: 320)
+
+        let root = NSView(frame: frame)
+        root.autoresizingMask = [.width, .height]
+
+        let label = NSTextField(labelWithString: language.text.languageLabel)
+        label.frame = NSRect(x: 18, y: frame.height - 42, width: 92, height: 20)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.autoresizingMask = [.minYMargin]
+        root.addSubview(label)
+        languageLabel = label
+
+        let popup = NSPopUpButton(frame: NSRect(x: 110, y: frame.height - 47, width: 140, height: 28),
+                                  pullsDown: false)
+        for option in AppLanguage.allCases {
+            popup.addItem(withTitle: option.displayName)
+            popup.lastItem?.representedObject = option.rawValue
+        }
+        popup.target = self
+        popup.action = #selector(languageChanged(_:))
+        popup.autoresizingMask = [.minYMargin]
+        root.addSubview(popup)
+        languagePopup = popup
+
+        let divider = NSBox(frame: NSRect(x: 0, y: frame.height - 58, width: frame.width, height: 1))
+        divider.boxType = .separator
+        divider.autoresizingMask = [.width, .minYMargin]
+        root.addSubview(divider)
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: frame.width, height: frame.height - 58))
+        scroll.autoresizingMask = [.width, .height]
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+
+        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: frame.width, height: frame.height - 58))
+        text.autoresizingMask = [.width]
+        text.isEditable = false
+        text.isSelectable = true
+        text.drawsBackground = false
+        text.textContainerInset = NSSize(width: 18, height: 18)
+        text.isHorizontallyResizable = false
+        text.isVerticallyResizable = true
+        text.textContainer?.widthTracksTextView = true
+        text.textContainer?.containerSize = NSSize(width: frame.width - 36, height: .greatestFiniteMagnitude)
+        text.font = .systemFont(ofSize: 13)
+        scroll.documentView = text
+        root.addSubview(scroll)
+        helpTextView = text
+
+        w.contentView = root
+        updateSettingsUI()
+        return w
+    }
+
+    @objc private func languageChanged(_ sender: NSPopUpButton) {
+        guard let rawValue = sender.selectedItem?.representedObject as? String,
+              let selected = AppLanguage(rawValue: rawValue),
+              selected != language else { return }
+        language = selected
+    }
+
+    private func applyLanguage() {
+        guard window != nil else { return }
+        let t = language.text
+        helpButton.title = t.settingsButton
+        airplayLabel.stringValue = t.airPlaySection
+        airplayEmpty.stringValue = t.airPlayEmpty
+        localLabel.stringValue = t.localSection
+        for row in localRows.values {
+            row.delayLabel.stringValue = t.delayLabel
+            row.secondsLabel.stringValue = t.secondsUnit
+        }
+        updateUI()
+        updateSettingsUI()
+        layoutContent()
+    }
+
+    private func updateSettingsUI() {
+        let t = language.text
+        helpWindow?.title = t.settingsTitle
+        languageLabel?.stringValue = t.languageLabel
+        languagePopup?.selectItem(withTitle: language.displayName)
+        if let helpTextView {
+            helpTextView.string = t.helpText
+            helpTextView.sizeToFit()
+        }
     }
 }
 
@@ -499,11 +720,15 @@ final class LocalRow {
     let container: NSView
     let check: NSButton
     let volume: NSSlider
+    let delayLabel: NSTextField
     let delaySlider: NSSlider
     let delayField: NSTextField
+    let secondsLabel: NSTextField
     init(uid: String, container: NSView, check: NSButton, volume: NSSlider,
-         delaySlider: NSSlider, delayField: NSTextField) {
+         delayLabel: NSTextField, delaySlider: NSSlider, delayField: NSTextField,
+         secondsLabel: NSTextField) {
         self.uid = uid; self.container = container; self.check = check; self.volume = volume
-        self.delaySlider = delaySlider; self.delayField = delayField
+        self.delayLabel = delayLabel; self.delaySlider = delaySlider
+        self.delayField = delayField; self.secondsLabel = secondsLabel
     }
 }
